@@ -2,7 +2,7 @@
 # nltk.download('vader_lexicon')
 
 import os
-from datetime import datetime
+import sqlite3
 
 import requests
 from dotenv import load_dotenv
@@ -11,38 +11,81 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 load_dotenv()
 sia = SentimentIntensityAnalyzer()
 
+db = sqlite3.connect("articles.db")
+cursor = db.cursor()
+
 API_KEY = str(os.getenv("API_KEY"))
 API_URL = "https://newsapi.org/v2/top-headlines"
 
 
 def calculate_sentiment(headlines):
-    refined = []
-    scores = []
-    comp_scores = []
+    data = []
+    sentiments = []
+    compounds = []
 
     for a in headlines:
         publisher = a["source"]["name"]
-        pub_date = datetime.fromisoformat(a["publishedAt"])
+        pub_date = a["publishedAt"]
         title = a["title"]
-        a_url = a["url"]
+        url = a["url"]
 
         description = "" if not a["description"] else a["description"]
         content = "" if not a["content"] else a["content"]
 
-        refined.append([publisher, pub_date, title, a_url])
+        data.append([publisher, pub_date, title, url])
 
         text = f"{title}. {description} {content}"
-        compound = sia.polarity_scores(text)["compound"]
-        comp_scores.append(compound)
+        comp = sia.polarity_scores(text)["compound"]
+        compounds.append(comp)
 
-        if compound >= 0.05:
-            scores.append("pos")
-        elif compound <= -0.05:
-            scores.append("neg")
+        if comp >= 0.05:
+            sentiments.append("pos")
+        elif comp <= -0.05:
+            sentiments.append("neg")
         else:
-            scores.append("neu")
+            sentiments.append("neu")
 
-    return refined, scores, comp_scores
+    return data, sentiments, compounds
+
+
+def save_articles(data, sentiment, compound):
+    for a in enumerate(data):
+        publisher, pub_date, title, url = a[1]
+        sen, comp = sentiment[a[0]], compound[a[0]]
+
+        cursor.execute(
+            """
+            INSERT INTO articles VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO NOTHING
+            """,
+            (a[0], publisher, pub_date, title, url, sen, comp),
+        )
+        db.commit()
+
+
+def search_articles(query):
+    q = "%" + query + "%"
+    cursor.execute("SELECT * FROM articles WHERE title LIKE (?)", (q,))
+    
+    results = cursor.fetchall()
+    return results
+
+def filter_articles(query, option):
+    match option:
+        case "date":
+            cursor.execute("SELECT * FROM articles WHERE pub_date = (?)", (query,))
+            return cursor.fetchall()
+        
+        case "company":
+            q = "%" + query + "%"
+            cursor.execute("SELECT * FROM articles WHERE publisher LIKE (?)", (q,))
+            return cursor.fetchall()
+        
+        case "sentiment":
+            cursor.execute("SELECT * FROM articles WHERE sentiment = (?)", (query,))
+            return cursor.fetchall()
+    
+    return None
 
 
 r = requests.get(
@@ -51,17 +94,18 @@ r = requests.get(
 j = r.json()
 articles = j["articles"]
 
-data, sentiments, compound_scores = calculate_sentiment(articles)
+data, sentiment, compound = calculate_sentiment(articles)
+save_articles(data, sentiment, compound)
 
-pos_score = sentiments.count("pos")
-neu_score = sentiments.count("neu")
-neg_score = sentiments.count("neg")
+pos_score = sentiment.count("pos")
+neu_score = sentiment.count("neu")
+neg_score = sentiment.count("neg")
 
-total = len(sentiments)
+total = len(sentiment)
 pos_pct = pos_score / total * 100
 neu_pct = neu_score / total * 100
 neg_pct = neg_score / total * 100
-average = sum(compound_scores) / total
+average = sum(compound) / total
 balance = pos_pct - neg_pct
 
 if pos_pct > 50:
